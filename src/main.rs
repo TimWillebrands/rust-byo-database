@@ -1,10 +1,10 @@
 enum BNodeType {
-    Node(usize),
-    Leaf(usize),
+    Node(u64),
+    Leaf(u64),
 }
 
 impl BNodeType {
-    fn header(&self) -> i32 {
+    fn header(&self) -> u8 {
         match *self {
             BNodeType::Node(_) => 1,
             BNodeType::Leaf(_) => 2,
