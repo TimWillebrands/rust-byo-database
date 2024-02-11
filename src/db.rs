@@ -38,7 +38,7 @@ impl BNode {
         let [type_high, type_low] = typ.as_u16().to_le_bytes();
         let [keys_high, keys_low] = keys.to_le_bytes();
 
-        let required_size = usize::from((HEADER as u16) + 8 * (keys-1)) + 8;
+        let required_size = usize::from((HEADER as u16) + 8*keys + 2*keys);
         let mut data = vec![type_high, type_low, keys_high, keys_low];
         data.resize(required_size.into(), 0);
 
@@ -71,7 +71,8 @@ impl BNode {
         let [type_high, type_low] = typ.as_u16().to_le_bytes();
         let [keys_high, keys_low] = keys.to_le_bytes();
 
-        let required_size = usize::from((HEADER as u16) + 8 * (keys-1)) + 8;
+        // let offset = usize::from((HEADER as u16) + 8*self.nkeys() + 2*(idx-1));
+        let required_size = usize::from((HEADER as u16) + 8*keys + 2*keys);
         self.data.resize(required_size.into(), 0);
 
         self.data[0] = type_high;
@@ -111,6 +112,42 @@ impl BNode {
         slice.swap_with_slice(&mut val_bytes);
 
         return Ok(());
+    }
+
+    fn offset(&self, idx: u16) -> [u8; 2] {
+        let offset = usize::from((HEADER as u16) + 8*self.nkeys() + 2*(idx-1));
+        self.data[offset..offset+2]
+            .try_into()
+            .expect("Offset was not right size? 2 bytes")
+    }
+
+    fn offset_mut(&mut self, idx: u16) -> &mut [u8] {
+        let offset = usize::from((HEADER as u16) + 8*self.nkeys() + 2*(idx-1));
+        &mut self.data[offset..offset+2]
+    }
+
+    pub fn get_offset(&self, idx: u16) -> Result<u16, String> {
+        if idx >= self.nkeys() {
+            return Err("Index out of bounds".to_string());
+        }
+
+        match idx {
+            0 => Ok(0),
+            _ => Ok(u16::from_le_bytes(self.offset(idx)))
+        }
+    }
+
+    pub fn set_offset(&mut self, idx: u16, offset:u16) -> Result<(), String>  {
+        if idx == 0 {
+            return Err("Plz no touching the 0th offset".to_string());
+        }
+
+        let off= self.offset_mut(idx);
+        let mut val = offset.to_le_bytes();
+
+        off.swap_with_slice(&mut val);
+        
+        Ok(())
     }
 }
 
@@ -182,5 +219,23 @@ mod tests {
         assert_eq!(val1, 11111);
         assert_eq!(val2, 33333);
         assert_eq!(val4, 55555);
+    }
+
+    #[test]
+    fn create_node_with_offsets() {
+        let mut node = BNode::new(BNodeType::Node, 5);
+
+        let _ = node.set_offset(3, 1);
+        let _ = node.set_offset(4, 2);
+        let set_0 = node.set_offset(0, 3);
+        
+        let off3 = node.get_offset(3).expect("Failed to get offset 3");
+        let off4 = node.get_offset(4).expect("Failed to get offset 4");
+        let off0 = node.get_offset(0).expect("Failed to get offset 0");
+
+        assert!(!set_0.is_ok());
+        assert_eq!(off3, 1);
+        assert_eq!(off4, 2);
+        assert_eq!(off0, 0);
     }
 }
