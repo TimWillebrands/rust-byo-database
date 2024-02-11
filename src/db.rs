@@ -38,7 +38,7 @@ impl BNode {
         let [type_high, type_low] = typ.as_u16().to_le_bytes();
         let [keys_high, keys_low] = keys.to_le_bytes();
 
-        let required_size = usize::from((HEADER as u16) + 8*keys + 2*keys);
+        let required_size = usize::from((HEADER as u16) + 8 * keys + 2 * keys);
         let mut data = vec![type_high, type_low, keys_high, keys_low];
         data.resize(required_size.into(), 0);
 
@@ -72,7 +72,7 @@ impl BNode {
         let [keys_high, keys_low] = keys.to_le_bytes();
 
         // let offset = usize::from((HEADER as u16) + 8*self.nkeys() + 2*(idx-1));
-        let required_size = usize::from((HEADER as u16) + 8*keys + 2*keys);
+        let required_size = usize::from((HEADER as u16) + 8 * keys + 2 * keys);
         self.data.resize(required_size.into(), 0);
 
         self.data[0] = type_high;
@@ -99,15 +99,15 @@ impl BNode {
 
         Ok(ptr)
     }
-    
-    pub fn set_ptr(&mut self, idx:u16, val:u64) -> Result<(), String> {
+
+    pub fn set_ptr(&mut self, idx: u16, val: u64) -> Result<(), String> {
         if idx >= self.nkeys() {
             return Err("Index out of bounds".to_string());
         }
         let pos = usize::from((HEADER as u16) + 8 * idx);
-        
+
         let mut val_bytes = val.to_le_bytes();
-        let slice = &mut self.data[pos..pos+8];
+        let slice = &mut self.data[pos..pos + 8];
 
         slice.swap_with_slice(&mut val_bytes);
 
@@ -115,15 +115,15 @@ impl BNode {
     }
 
     fn offset(&self, idx: u16) -> [u8; 2] {
-        let offset = usize::from((HEADER as u16) + 8*self.nkeys() + 2*(idx-1));
-        self.data[offset..offset+2]
+        let offset = usize::from((HEADER as u16) + 8 * self.nkeys() + 2 * (idx - 1));
+        self.data[offset..offset + 2]
             .try_into()
             .expect("Offset was not right size? 2 bytes")
     }
 
     fn offset_mut(&mut self, idx: u16) -> &mut [u8] {
-        let offset = usize::from((HEADER as u16) + 8*self.nkeys() + 2*(idx-1));
-        &mut self.data[offset..offset+2]
+        let offset = usize::from((HEADER as u16) + 8 * self.nkeys() + 2 * (idx - 1));
+        &mut self.data[offset..offset + 2]
     }
 
     pub fn get_offset(&self, idx: u16) -> Result<u16, String> {
@@ -133,21 +133,79 @@ impl BNode {
 
         match idx {
             0 => Ok(0),
-            _ => Ok(u16::from_le_bytes(self.offset(idx)))
+            _ => Ok(u16::from_le_bytes(self.offset(idx))),
         }
     }
 
-    pub fn set_offset(&mut self, idx: u16, offset:u16) -> Result<(), String>  {
+    pub fn set_offset(&mut self, idx: u16, offset: u16) -> Result<(), String> {
         if idx == 0 {
             return Err("Plz no touching the 0th offset".to_string());
         }
 
-        let off= self.offset_mut(idx);
+        let off = self.offset_mut(idx);
         let mut val = offset.to_le_bytes();
 
         off.swap_with_slice(&mut val);
-        
+
         Ok(())
+    }
+
+    pub fn kv_pos(&self, idx: u16) -> Result<u16, String> {
+        match self.get_offset(idx) {
+            Ok(off) => Ok((HEADER as u16) + 8 * self.nkeys() + 2 * self.nkeys() + off),
+            Err(err) => Err(err),
+        }
+    }
+
+    pub fn get_key(&self, idx: u16) -> Result<&[u8], String> {
+        let pos = self.kv_pos(idx)? as usize;
+
+        if pos + 2 > self.data.len() {
+            return Err("Not enough data to read key length".to_string());
+        }
+
+        let klen_bytes: [u8; 2] = self.data[pos..pos + 2]
+            .try_into()
+            .map_err(|_| "Failed to read key length".to_string())?;
+
+        let klen = u16::from_le_bytes(klen_bytes) as usize;
+        if pos + 4 + klen > self.data.len() {
+            return Err("Key length exceeds data bounds".to_string());
+        }
+
+        Ok(&self.data[pos + 4..pos + 4 + klen])
+    }
+
+    fn get_val(&self, idx: u16) -> Result<&[u8], String> {
+        if idx >= self.nkeys() {
+            return Err("Index out of bounds".to_string());
+        }
+
+        let pos = self.kv_pos(idx)? as usize; // Handle error if kv_pos fails
+
+        // Check if there's enough data to read key length and value length
+        if pos + 4 > self.data.len() {
+            return Err("Not enough data to read key and value length".to_string());
+        }
+
+        let klen_bytes: [u8; 2] = self.data[pos..pos + 2]
+            .try_into()
+            .map_err(|_| "Failed to read key length".to_string())?;
+
+        let vlen_bytes: [u8; 2] = self.data[pos + 2..pos + 4]
+            .try_into()
+            .map_err(|_| "Failed to read value length".to_string())?;
+
+        let klen = u16::from_le_bytes(klen_bytes) as usize;
+        let vlen = u16::from_le_bytes(vlen_bytes) as usize;
+
+        // Ensure the entire key-value pair is within the bounds of the data
+        if pos + 4 + klen + vlen > self.data.len() {
+            return Err("Key-value pair exceeds data bounds".to_string());
+        }
+
+        // Return the value part as a slice
+        Ok(&self.data[pos + 4 + klen..pos + 4 + klen + vlen])
     }
 }
 
@@ -191,11 +249,11 @@ mod tests {
     #[test]
     fn create_node_with_value() {
         let mut node = BNode::new(BNodeType::Node, 1);
-        let val:u64 = 123456789;
+        let val: u64 = 123456789;
         let res = node.set_ptr(0, val);
 
         assert!(res.is_ok());
-        
+
         let retreived_val = node.get_ptr(0);
 
         assert!(retreived_val.is_ok());
@@ -203,13 +261,13 @@ mod tests {
     }
 
     #[test]
-    fn create_node_with_values() {
+    fn values() {
         let mut node = BNode::new(BNodeType::Node, 5);
         _ = node.set_ptr(1, 11111);
         _ = node.set_ptr(0, 22222);
         _ = node.set_ptr(2, 33333);
         _ = node.set_ptr(4, 55555);
-        
+
         let val0 = node.get_ptr(0).expect("Failed to get idx 0");
         let val1 = node.get_ptr(1).expect("Failed to get idx 1");
         let val2 = node.get_ptr(2).expect("Failed to get idx 2");
@@ -222,13 +280,13 @@ mod tests {
     }
 
     #[test]
-    fn create_node_with_offsets() {
+    fn offsets() {
         let mut node = BNode::new(BNodeType::Node, 5);
 
         let _ = node.set_offset(3, 1);
         let _ = node.set_offset(4, 2);
         let set_0 = node.set_offset(0, 3);
-        
+
         let off3 = node.get_offset(3).expect("Failed to get offset 3");
         let off4 = node.get_offset(4).expect("Failed to get offset 4");
         let off0 = node.get_offset(0).expect("Failed to get offset 0");
@@ -237,5 +295,24 @@ mod tests {
         assert_eq!(off3, 1);
         assert_eq!(off4, 2);
         assert_eq!(off0, 0);
+    }
+
+    #[test]
+    fn key_values() {
+        let mut node = BNode::new(BNodeType::Node, 5);
+
+        // let _ = node.set_offset(3, 1);
+        // let _ = node.set_offset(4, 2);
+        // let set_0 = node.set_offset(0, 3);
+        //
+        // let off3 = node.get_offset(3).expect("Failed to get offset 3");
+        // let off4 = node.get_offset(4).expect("Failed to get offset 4");
+        // let off0 = node.get_offset(0).expect("Failed to get offset 0");
+        //
+        // assert!(!set_0.is_ok());
+        // assert_eq!(off3, 1);
+        // assert_eq!(off4, 2);
+        // assert_eq!(off0, 0);
+        assert!(false, "We stopped at: https://build-your-own.org/database/04_btree_code_1 4.4 The B-Tree insertion");
     }
 }
