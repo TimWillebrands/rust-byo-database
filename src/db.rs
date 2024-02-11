@@ -91,6 +91,20 @@ impl BNode {
 
         Ok(ptr)
     }
+    
+    pub fn set_ptr(&mut self, idx:u16, val:u64) -> Result<(), String> {
+        if idx >= self.nkeys() {
+            return Err("Index out of bounds".to_string());
+        }
+        let pos = usize::from((HEADER as u16) + 8 * idx);
+        
+        let val_bytes = val.to_le_bytes();
+        let &mut slice = self.data[pos..pos+8];
+
+        slice.swap();
+
+        return Ok(());
+    }
 }
 
 #[cfg(test)]
