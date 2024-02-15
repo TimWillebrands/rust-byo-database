@@ -24,15 +24,6 @@ pub struct BNode {
     data: Vec<u8>, // can be dumped to the disk
 }
 
-pub struct BTree {
-    // pointer (a nonzero page number)
-    root: u64,
-    // callbacks for managing on-disk pages
-    // get func(uint64) BNode // dereference a pointer
-    // new func(BNode) uint64 // allocate a new page
-    // del func(uint64)       // deallocate a page
-}
-
 impl BNode {
     pub fn new(typ: BNodeType, keys: u16) -> BNode {
         let [type_high, type_low] = typ.as_u16().to_le_bytes();
@@ -42,7 +33,7 @@ impl BNode {
         let mut data = vec![type_high, type_low, keys_high, keys_low];
         data.resize(required_size.into(), 0);
 
-        return BNode { data };
+        BNode { data }
     }
 
     pub fn btype(&self) -> Result<BNodeType, String> {
@@ -176,7 +167,7 @@ impl BNode {
         Ok(&self.data[pos + 4..pos + 4 + klen])
     }
 
-    fn get_val(&self, idx: u16) -> Result<&[u8], String> {
+    pub fn get_val(&self, idx: u16) -> Result<&[u8], String> {
         if idx >= self.nkeys() {
             return Err("Index out of bounds".to_string());
         }
@@ -206,6 +197,182 @@ impl BNode {
 
         // Return the value part as a slice
         Ok(&self.data[pos + 4 + klen..pos + 4 + klen + vlen])
+    }
+
+    /// determine the size of the node.
+    pub fn nbytes(&self) -> Result<u16, String> {
+        self.kv_pos(self.nkeys())
+    }
+
+    /// To insert a key into a leaf node, we need to look up its position in the sorted KV list.
+    /// returns the first kid node whose range intersects the key. (kid[i] <= key)
+    /// TODO: Bisect
+    pub fn node_lookup_le(&self, key: &[u8]) -> Result<u16, String> {
+        let mut last_found = 0u16; // Initialize with 0, assuming the first key is always less than or equal
+
+        // Start from 1 since the first key is always considered less than or equal
+        for i in 1..self.nkeys() {
+            let current_key = self.get_key(i)?;
+            match current_key.cmp(key) {
+                std::cmp::Ordering::Greater => break,
+                _ => last_found = i,
+            }
+        }
+
+        Ok(last_found)
+    }
+
+    /// The nodeAppendKV function copies a KV pair to the new node.
+    pub fn node_append_kv(
+        &mut self,
+        idx: u16,
+        ptr: u64,
+        key: &[u8],
+        val: &[u8],
+    ) -> Result<(), String> {
+        // ptrs
+        self.set_ptr(idx, ptr)?;
+
+        // KVs
+        let pos = self.kv_pos(idx)? as usize;
+
+        let [dlen_high, dlen_low] = (key.len() as u16).to_le_bytes();
+        self.data[pos + 0] = dlen_high;
+        self.data[pos + 1] = dlen_low;
+        self.data[pos + 2] = dlen_high;
+        self.data[pos + 3] = dlen_low;
+
+        let end_of_key_pos = pos + 4 + key.len();
+        let key_slice = &mut self.data[pos + 4..end_of_key_pos];
+        key_slice.copy_from_slice(key);
+
+        let val_slice = &mut self.data[end_of_key_pos..end_of_key_pos + val.len()];
+        val_slice.copy_from_slice(val);
+
+        // the offset of the next key
+        self.set_offset(
+            idx + 1,
+            self.get_offset(idx)? + 4 + key.len() as u16 + val.len() as u16,
+        )?;
+
+        Ok(())
+    }
+
+    /// The nodeAppendRange function copies keys from an old node to a new node.
+    /// copy multiple KVs into the position
+    pub fn node_append_range(
+        &mut self,
+        old: &BNode,
+        dst_new: u16,
+        src_old: u16,
+        n: u16,
+    ) -> Result<(), String> {
+        if src_old + n <= old.nkeys() {
+            return Err("src_old has insuffiecient space/keys for this append".to_string());
+        }
+        if dst_new + n <= self.nkeys() {
+            return Err("dst_new has insuffiecient space/keys for this append".to_string());
+        }
+        if n == 0 {
+            return Ok(());
+        }
+
+        // pointers
+        for i in 0..n {
+            self.set_ptr(dst_new + i, old.get_ptr(src_old + i)?)?;
+        }
+
+        // offsets
+        let dst_begin = self.get_offset(dst_new)?;
+        let src_begin = old.get_offset(src_old)?;
+        for i in 1..=n {
+            let offset = dst_begin + old.get_offset(src_old + i)? - src_begin;
+            self.set_offset(dst_new + i, offset)?;
+        }
+
+        // KVs
+        let begin = old.kv_pos(src_old)? as usize;
+        let end = old.kv_pos(src_old + n)? as usize;
+        let dst_start = self.kv_pos(dst_new)? as usize;
+
+        let src_slice = &old.data[begin..end];
+        let dst_slice = &mut self.data[dst_start..dst_start + src_slice.len()];
+        dst_slice.copy_from_slice(src_slice);
+
+        Ok(())
+    }
+
+    pub fn leaf_insert(
+        &mut self,
+        old: &BNode,
+        idx: u16,
+        key: &[u8],
+        val: &[u8],
+    ) -> Result<(), String> {
+        self.set_header(BNodeType::Leaf, old.nkeys() + 1);
+        self.node_append_range(old, 0, 0, idx)?;
+        self.node_append_kv(idx, 0, key, val)?;
+        self.node_append_range(old, idx + 1, idx, old.nkeys() - idx)?;
+
+        Ok(())
+    }
+
+    pub fn leaf_update(
+        &mut self,
+        old: &BNode,
+        idx: u16,
+        key: &[u8],
+        val: &[u8],
+    ) -> Result<(), String> {
+        assert!(false, "We stopped at: https://build-your-own.org/database/04_btree_code_1 4.4 Step 3: Recursive Insertion");
+
+        Ok(())
+    }
+}
+
+pub struct BTree {
+    // pointer (a nonzero page number)
+    root: u64,
+    // callbacks for managing on-disk pages
+    // get func(uint64) BNode // dereference a pointer
+    // new func(BNode) uint64 // allocate a new page
+    // del func(uint64)       // deallocate a page
+}
+
+impl BTree {
+    /// insert a KV into a node, the result might be split into 2 nodes.
+    /// the caller is responsible for deallocating the input node
+    /// and splitting and allocating result nodes.
+    pub fn tree_insert(&mut self, node: BNode, key: &[u8], val: &[u8]) -> Result<BNode, String> {
+        // the result node.
+        // it's allowed to be bigger than 1 page and will be split if so
+        let mut new = BNode {
+            data: vec![0; 2 * BTREE_PAGE_SIZE as usize],
+        };
+
+        // where to insert the keu?
+        let idx = node.node_lookup_le(key)?;
+
+        // act depending on the node type
+        let _ = match node.btype()? {
+            BNodeType::Leaf => {
+                // leaf, node.getKey(idx) <= key
+                match key.cmp(node.get_key(idx)?) {
+                    std::cmp::Ordering::Equal => new.leaf_update(&node, idx, key, val),
+                    _ => new.leaf_insert(&node, idx, key, val),
+                }
+            }
+            BNodeType::Node => self.node_insert(&new, &node, idx, key, val),
+        };
+
+        Ok(new)
+    }
+
+    // part of the treeInsert(): KV insertion to an internal node
+    pub fn node_insert(&mut self, new: &BNode, node: &BNode, idx: u16, key: &[u8], val: &[u8] ) -> Result<(), String> {
+
+        assert!(false, "We stopped at: https://build-your-own.org/database/04_btree_code_1 4.4 Step 4: Handle Internal Nodes");
+        Ok(())
     }
 }
 
@@ -301,6 +468,7 @@ mod tests {
     fn key_values() {
         let mut node = BNode::new(BNodeType::Node, 5);
 
+        // node.node_append_kv(3, 1337, )
         // let _ = node.set_offset(3, 1);
         // let _ = node.set_offset(4, 2);
         // let set_0 = node.set_offset(0, 3);
@@ -313,6 +481,5 @@ mod tests {
         // assert_eq!(off3, 1);
         // assert_eq!(off4, 2);
         // assert_eq!(off0, 0);
-        assert!(false, "We stopped at: https://build-your-own.org/database/04_btree_code_1 4.4 The B-Tree insertion");
     }
 }
