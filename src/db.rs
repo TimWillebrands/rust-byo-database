@@ -72,20 +72,54 @@ impl BNode {
         self.data[3] = keys_low;
     }
 
+    /// Retrieves a 64-bit pointer from a node at a specified index.
+    ///
+    /// # Arguments
+    /// * `idx` - Index at which to retrieve the pointer.
+    ///
+    /// # Returns
+    /// * `Ok(u64)` - The pointer if successfully retrieved.
+    /// * `Err(String)` - Error message if the index is out of bounds or data extraction fails.
+    ///
+    /// # Errors
+    /// Errors occur if `idx` is out of bounds or if the data slice for the pointer is incorrectly sized.
+    ///
+    /// # Example
+    /// ```
+    /// use byodb_rust::db::*;
+    /// let node = BNode::new(BNodeType::Leaf, 1); // Assuming initialization is done elsewhere
+    /// match node.get_ptr(1) {
+    ///     Ok(ptr) => println!("Found pointer: {}", ptr),
+    ///     Err(e) => eprintln!("Error: {}", e),
+    /// }
+    /// ```
+    ///
+    /// This method is used to access child node pointers in B-trees.
     pub fn get_ptr(&self, idx: u16) -> Result<u64, String> {
         if idx >= self.nkeys() {
-            return Err("Index out of bounds".to_string());
+            return Err(format!(
+                "Index out of bounds: {} >= keys {}",
+                idx,
+                self.nkeys()
+            ));
         }
         let pos = usize::from((HEADER as u16) + 8 * idx);
 
         if pos + 8 > self.data.len() {
-            return Err("Index out of data range".to_string());
+            return Err(format!(
+                "Index out of data range: position {} + 8 exceeds data length {}",
+                pos,
+                self.data.len()
+            ));
         }
 
         // Safely extract a u64 from the data slice
-        let ptr_bytes = &self.data[pos..pos + 8]
-            .try_into()
-            .expect("slice with incorrect length");
+        let ptr_bytes = &self.data[pos..pos + 8].try_into().map_err(|_| {
+            format!(
+                "Failed to extract a u64 from data slice: expected 8 bytes, found {}",
+                self.data[pos..].len()
+            )
+        })?;
         let ptr = u64::from_le_bytes(*ptr_bytes);
 
         Ok(ptr)
@@ -93,7 +127,11 @@ impl BNode {
 
     pub fn set_ptr(&mut self, idx: u16, val: u64) -> Result<(), String> {
         if idx >= self.nkeys() {
-            return Err("Index out of bounds".to_string());
+            return Err(format!(
+                "Index out of bounds: {} >= keys: {}",
+                idx,
+                self.nkeys()
+            ));
         }
         let pos = usize::from((HEADER as u16) + 8 * idx);
 
@@ -102,7 +140,7 @@ impl BNode {
 
         slice.swap_with_slice(&mut val_bytes);
 
-        return Ok(());
+        Ok(())
     }
 
     fn offset(&self, idx: u16) -> [u8; 2] {
@@ -119,7 +157,7 @@ impl BNode {
 
     pub fn get_offset(&self, idx: u16) -> Result<u16, String> {
         if idx >= self.nkeys() {
-            return Err("Index out of bounds".to_string());
+            return Err(format!("Index '{}' out of bounds: '{}'", idx, self.nkeys()));
         }
 
         match idx {
@@ -169,7 +207,11 @@ impl BNode {
 
     pub fn get_val(&self, idx: u16) -> Result<&[u8], String> {
         if idx >= self.nkeys() {
-            return Err("Index out of bounds".to_string());
+            return Err(format!(
+                "Index out of bounds: {} >= nkeys: {}",
+                idx,
+                self.nkeys()
+            ));
         }
 
         let pos = self.kv_pos(idx)? as usize; // Handle error if kv_pos fails
@@ -222,7 +264,57 @@ impl BNode {
         Ok(last_found)
     }
 
-    /// The nodeAppendKV function copies a KV pair to the new node.
+    // /// The nodeAppendKV function copies a KV pair to the new node.
+    // pub fn node_append_kv(
+    //     &mut self,
+    //     idx: u16,
+    //     ptr: u64,
+    //     key: &[u8],
+    //     val: &[u8],
+    // ) -> Result<(), String> {
+    //     // ptrs
+    //     self.set_ptr(idx, ptr)?;
+    //
+    //     // KVs
+    //     let pos = self.kv_pos(idx)? as usize;
+    //
+    //     let [dlen_high, dlen_low] = (key.len() as u16).to_le_bytes();
+    //     self.data[pos + 0] = dlen_high;
+    //     self.data[pos + 1] = dlen_low;
+    //     self.data[pos + 2] = dlen_high;
+    //     self.data[pos + 3] = dlen_low;
+    //
+    //     let end_of_key_pos = pos + 4 + key.len();
+    //     let key_slice = &mut self.data[pos + 4..end_of_key_pos];
+    //     key_slice.copy_from_slice(key);
+    //
+    //     let val_slice = &mut self.data[end_of_key_pos..end_of_key_pos + val.len()];
+    //     val_slice.copy_from_slice(val);
+    //
+    //     // the offset of the next key
+    //     self.set_offset(
+    //         idx + 1,
+    //         self.get_offset(idx)? + 4 + key.len() as u16 + val.len() as u16,
+    //     )?;
+    //
+    //     Ok(())
+    // }
+
+    /// Appends a key-value pair into a specified position within a BNode.
+    ///
+    /// Sets a pointer at the given index, copies the key and value into the node's data,
+    /// and updates the offset for the next key-value pair, all without external crate dependencies.
+    ///
+    /// # Arguments
+    ///
+    /// * `idx` - The index at which to append the key-value pair.
+    /// * `ptr` - The pointer associated with the key-value pair (not used in this example, but typically for linking nodes).
+    /// * `key` - The key to append.
+    /// * `val` - The value associated with the key.
+    ///
+    /// # Returns
+    ///
+    /// Result<(), String> indicating success or failure.
     pub fn node_append_kv(
         &mut self,
         idx: u16,
@@ -233,29 +325,42 @@ impl BNode {
         // ptrs
         self.set_ptr(idx, ptr)?;
 
-        // KVs
+        // Calculate the position for the KV pair data
         let pos = self.kv_pos(idx)? as usize;
 
-        let [dlen_high, dlen_low] = (key.len() as u16).to_le_bytes();
-        self.data[pos + 0] = dlen_high;
-        self.data[pos + 1] = dlen_low;
-        self.data[pos + 2] = dlen_high;
-        self.data[pos + 3] = dlen_low;
+        // Calculate the additional space needed for the new KV pair.
+        let additional_space = 4 + key.len() + val.len(); // 2B for each length + key and value sizes
 
-        let end_of_key_pos = pos + 4 + key.len();
-        let key_slice = &mut self.data[pos + 4..end_of_key_pos];
-        key_slice.copy_from_slice(key);
+        // Ensure there is enough space in the data vector
+        let required_space = pos + additional_space;
 
-        let val_slice = &mut self.data[end_of_key_pos..end_of_key_pos + val.len()];
-        val_slice.copy_from_slice(val);
+        if required_space > self.data.len() {
+            let extra_space = std::cmp::max(self.data.capacity() / 10, 256); // Example: 10% or at least 256 bytes
+            self.data.resize(required_space + extra_space, 0); // Adjust length, filling new space with 0s
 
-        // the offset of the next key
-        self.set_offset(
-            idx + 1,
-            self.get_offset(idx)? + 4 + key.len() as u16 + val.len() as u16,
-        )?;
+            // println!(
+            //     "Resized space in the node data to append to idx {}. Required: {}, New-available: {}, Position: {}, Key Length: {}, Value Length: {}",
+            //     idx, required_space, self.data.capacity(), pos, key.len(), val.len());
+        }
 
-        Ok(())
+        // Write the length of the key in little-endian format
+        let key_len_bytes = (key.len() as u16).to_le_bytes();
+        self.data[pos..pos + 2].copy_from_slice(&key_len_bytes);
+
+        // Write the length of the value in little-endian format
+        let val_len_bytes = (val.len() as u16).to_le_bytes();
+        self.data[pos + 2..pos + 4].copy_from_slice(&val_len_bytes);
+
+        // Copy the key bytes
+        self.data[pos + 4..pos + 4 + key.len()].copy_from_slice(key);
+
+        // Copy the value bytes
+        self.data[pos + 4 + key.len()..pos + 4 + key.len() + val.len()].copy_from_slice(val);
+
+        // Update the offset for the next key-value pair
+        let next_kv_offset = (pos + 4 + key.len() + val.len()) as u16;
+
+        self.set_offset(idx + 1, next_kv_offset)
     }
 
     /// The nodeAppendRange function copies keys from an old node to a new node.
@@ -267,11 +372,17 @@ impl BNode {
         src_old: u16,
         n: u16,
     ) -> Result<(), String> {
-        if src_old + n <= old.nkeys() {
-            return Err("src_old has insuffiecient space/keys for this append".to_string());
+        if src_old + n > old.nkeys() {
+            return Err(format!(
+                "src_old + n exceeds the number of keys in the old node. src_old: {}, n: {}, old.nkeys(): {}",
+                src_old, n, old.nkeys()
+            ));
         }
-        if dst_new + n <= self.nkeys() {
-            return Err("dst_new has insuffiecient space/keys for this append".to_string());
+        if dst_new + n > self.nkeys() {
+            return Err(format!(
+                "dst_new + n exceeds the number of keys in the new node. dst_new: {}, n: {}, self.nkeys(): {}",
+                dst_new, n, self.nkeys()
+            ));
         }
         if n == 0 {
             return Ok(());
@@ -302,31 +413,50 @@ impl BNode {
         Ok(())
     }
 
-    pub fn leaf_insert(
-        &mut self,
-        old: &BNode,
-        idx: u16,
-        key: &[u8],
-        val: &[u8],
-    ) -> Result<(), String> {
-        self.set_header(BNodeType::Leaf, old.nkeys() + 1);
-        self.node_append_range(old, 0, 0, idx)?;
-        self.node_append_kv(idx, 0, key, val)?;
-        self.node_append_range(old, idx + 1, idx, old.nkeys() - idx)?;
+    /// Creates a new BNode by inserting a new key-value pair into the current node.
+    ///
+    /// The new node is a modified copy of the current node (`self`) with the new key-value pair
+    /// inserted at the specified index. This method is intended for leaf nodes in a B-tree and
+    /// ensures the logical structure of the tree is maintained.
+    ///
+    /// # Arguments
+    ///
+    /// * `idx` - The index at which the new key-value pair should be inserted.
+    /// * `key` - The key to insert.
+    /// * `val` - The value associated with the key.
+    ///
+    /// # Returns
+    ///
+    /// A new `BNode` instance representing the current node with the additional key-value pair,
+    /// or an error if the operation cannot be completed.
+    pub fn leaf_insert(&self, idx: u16, key: &[u8], val: &[u8]) -> Result<BNode, String> {
+        let mut new = BNode::new(BNodeType::Leaf, self.nkeys() + 1);
 
-        Ok(())
+        // Copy all key-value pairs from `self` to `new` up to the one being updated
+        new.node_append_range(self, 0, 0, idx)?;
+        new.node_append_kv(idx, 0, key, val)?;
+        new.node_append_range(self, idx + 1, idx, self.nkeys() - idx)?;
+
+        Ok(new)
     }
 
-    pub fn leaf_update(
-        &mut self,
-        old: &BNode,
-        idx: u16,
-        key: &[u8],
-        val: &[u8],
-    ) -> Result<(), String> {
-        assert!(false, "We stopped at: https://build-your-own.org/database/04_btree_code_1 4.4 Step 3: Recursive Insertion");
+    pub fn leaf_update(&self, idx: u16, key: &[u8], val: &[u8]) -> Result<BNode, String> {
+        let mut new = BNode {
+            data: vec![0; 2 * BTREE_PAGE_SIZE as usize],
+        };
 
-        Ok(())
+        new.set_header(BNodeType::Leaf, self.nkeys());
+
+        // Copy all key-value pairs from `self` to `new` up to the one being updated
+        new.node_append_range(self, 0, 0, idx)?;
+
+        // Assuming node_append_kv is modified to handle updates if idx points to an existing key
+        new.node_append_kv(idx, 0, key, val)?;
+
+        // Copy the remaining key-value pairs from `self` to `new` after the updated one
+        new.node_append_range(self, idx + 1, idx + 1, self.nkeys() - idx - 1)?;
+
+        Ok(new)
     }
 }
 
@@ -344,35 +474,32 @@ impl BTree {
     /// the caller is responsible for deallocating the input node
     /// and splitting and allocating result nodes.
     pub fn tree_insert(&mut self, node: BNode, key: &[u8], val: &[u8]) -> Result<BNode, String> {
-        // the result node.
-        // it's allowed to be bigger than 1 page and will be split if so
-        let mut new = BNode {
-            data: vec![0; 2 * BTREE_PAGE_SIZE as usize],
-        };
-
-        // where to insert the keu?
+        // where to insert the key?
         let idx = node.node_lookup_le(key)?;
 
         // act depending on the node type
-        let _ = match node.btype()? {
-            BNodeType::Leaf => {
-                // leaf, node.getKey(idx) <= key
-                match key.cmp(node.get_key(idx)?) {
-                    std::cmp::Ordering::Equal => new.leaf_update(&node, idx, key, val),
-                    _ => new.leaf_insert(&node, idx, key, val),
-                }
-            }
-            BNodeType::Node => self.node_insert(&new, &node, idx, key, val),
-        };
-
-        Ok(new)
+        match node.btype()? {
+            BNodeType::Leaf => match key.cmp(node.get_key(idx)?) {
+                std::cmp::Ordering::Equal => node.leaf_update(idx, key, val),
+                _ => node.leaf_insert(idx, key, val),
+            },
+            BNodeType::Node => self.node_insert(&node, idx, key, val),
+        }
     }
 
     // part of the treeInsert(): KV insertion to an internal node
-    pub fn node_insert(&mut self, new: &BNode, node: &BNode, idx: u16, key: &[u8], val: &[u8] ) -> Result<(), String> {
-
+    pub fn node_insert(
+        &mut self,
+        node: &BNode,
+        idx: u16,
+        key: &[u8],
+        val: &[u8],
+    ) -> Result<BNode, String> {
         assert!(false, "We stopped at: https://build-your-own.org/database/04_btree_code_1 4.4 Step 4: Handle Internal Nodes");
-        Ok(())
+        let mut new = BNode {
+            data: vec![0; 2 * BTREE_PAGE_SIZE as usize],
+        };
+        Ok(new)
     }
 }
 
@@ -397,6 +524,9 @@ mod tests {
     #[test]
     fn create_node_and_mutate_headers() {
         let mut node = BNode::new(BNodeType::Node, 4);
+        let required_size = usize::from((HEADER as u16) + 8 * 4 + 2 * 4);
+
+        assert_eq!(node.data.len(), required_size);
 
         let btype = node.btype();
         assert!(matches!(btype, Ok(BNodeType::Node)));
@@ -411,10 +541,13 @@ mod tests {
 
         let keys = node.nkeys();
         assert_eq!(keys, 6);
+
+        let required_size = usize::from((HEADER as u16) + 8 * 6 + 2 * 6);
+        assert_eq!(node.data.len(), required_size);
     }
 
     #[test]
-    fn create_node_with_value() {
+    fn create_node_with_ptrvalue() {
         let mut node = BNode::new(BNodeType::Node, 1);
         let val: u64 = 123456789;
         let res = node.set_ptr(0, val);
@@ -428,7 +561,7 @@ mod tests {
     }
 
     #[test]
-    fn values() {
+    fn check_ptrvalues() {
         let mut node = BNode::new(BNodeType::Node, 5);
         _ = node.set_ptr(1, 11111);
         _ = node.set_ptr(0, 22222);
@@ -465,21 +598,15 @@ mod tests {
     }
 
     #[test]
-    fn key_values() {
-        let mut node = BNode::new(BNodeType::Node, 5);
+    fn key_values() -> Result<(), String> {
+        let node = BNode::new(BNodeType::Node, 0);
 
-        // node.node_append_kv(3, 1337, )
-        // let _ = node.set_offset(3, 1);
-        // let _ = node.set_offset(4, 2);
-        // let set_0 = node.set_offset(0, 3);
-        //
-        // let off3 = node.get_offset(3).expect("Failed to get offset 3");
-        // let off4 = node.get_offset(4).expect("Failed to get offset 4");
-        // let off0 = node.get_offset(0).expect("Failed to get offset 0");
-        //
-        // assert!(!set_0.is_ok());
-        // assert_eq!(off3, 1);
-        // assert_eq!(off4, 2);
-        // assert_eq!(off0, 0);
+        let new = node.leaf_insert(0, b"hallo", b"wereld")?;
+        let pos = new.node_lookup_le(b"hallo")?;
+        assert_eq!(pos, 0);
+        let val = new.get_val(pos);
+        assert_eq!(val, Ok(b"wereld" as &[u8]));
+
+        Ok(())
     }
 }
