@@ -250,9 +250,22 @@ impl BNode {
         self.kv_pos(self.nkeys())
     }
 
-    /// To insert a key into a leaf node, we need to look up its position in the sorted KV list.
-    /// returns the first kid node whose range intersects the key. (kid[i] <= key)
-    /// TODO: Bisect
+    /// Performs a lookup to find the position of a child node whose key range intersects with the given key.
+    ///
+    /// This method scans through the keys of the node starting from index 1, assuming the first key (index 0)
+    /// is always less than or equal to any given key. It identifies the highest index at which the node's key
+    /// is less than or equal to the provided key. This index represents the closest child node whose range
+    /// could contain or is related to the given key.
+    ///
+    /// Note: This function returns an index that may not directly correspond to the exact key if it doesn't exist.
+    /// It's essential to verify the presence of the key at the returned index in the node if exact matches are required.
+    ///
+    /// # Arguments
+    /// * `key` - The key for which the lookup is performed, as a byte slice.
+    ///
+    /// # Returns
+    /// * `Result<u16, String>` - Ok contains the index of the closest child node by key range.
+    ///   Err returns a string describing the error if any issues occur during key retrieval.
     pub fn node_lookup_le(&self, key: &[u8]) -> Result<u16, String> {
         let mut last_found = 0u16; // Initialize with 0, assuming the first key is always less than or equal
 
@@ -295,6 +308,9 @@ impl BNode {
     /// # Returns
     ///
     /// Result<(), String> indicating success or failure.
+    ///
+    /// The method is useful for navigating B-trees, where finding the correct child node based on key ranges
+    /// is essential for insertions, deletions, and searches.
     pub fn node_append_kv(
         &mut self,
         idx: u16,
@@ -373,7 +389,6 @@ impl BNode {
         let dst_begin = self.get_offset(dst_new)?;
         let src_begin = old.get_offset(src_old)?;
         for i in 1..=n {
-            // 1..=n
             let offset = dst_begin + old.get_offset(src_old + i)? - src_begin;
             self.set_offset(dst_new + i, offset)?;
         }
@@ -423,7 +438,7 @@ impl BNode {
     pub fn leaf_insert(&self, idx: u16, key: &[u8], val: &[u8]) -> Result<BNode, String> {
         let mut new = BNode::new(BNodeType::Leaf, self.nkeys() + 1);
 
-        // Copy all key-value pairs from `self` to `new` up to the one being updated
+        // Copy all key-value pairs from `self` to `new` up to the one being inserted
         new.node_append_range(self, 0, 0, idx)?;
         new.node_append_kv(idx, 0, key, val)?;
         new.node_append_range(self, idx + 1, idx, self.nkeys() - idx)?;
@@ -432,16 +447,15 @@ impl BNode {
     }
 
     pub fn leaf_update(&self, idx: u16, key: &[u8], val: &[u8]) -> Result<BNode, String> {
-        let mut new = BNode {
-            data: vec![0; 2 * BTREE_PAGE_SIZE as usize],
-        };
+        let mut new = BNode::new(BNodeType::Leaf, self.nkeys());
 
-        new.set_header(BNodeType::Leaf, self.nkeys());
-
+        println!("src: {:?}", self.data);
+        println!("new: {:?}", new.data);
         // Copy all key-value pairs from `self` to `new` up to the one being updated
         new.node_append_range(self, 0, 0, idx)?;
 
-        // Assuming node_append_kv is modified to handle updates if idx points to an existing key
+        println!("newer: {:?}", new.data);
+        // Insert key-value at the spot that was to be "updated"
         new.node_append_kv(idx, 0, key, val)?;
 
         // Copy the remaining key-value pairs from `self` to `new` after the updated one
@@ -589,7 +603,34 @@ mod tests {
     }
 
     #[test]
-    fn node_key_values() -> Result<(), String> {
+    fn node_lookup_key_values() -> Result<(), String> {
+        let node = BNode::new(BNodeType::Node, 0)
+            .leaf_insert(0, b"hallo", b"wereld")?
+            .leaf_insert(1, b"hello", b"world")?;
+
+        let pos = node.node_lookup_le(b"hallo")?;
+        let val = node.get_val(pos);
+        let key = node.get_key(pos);
+        assert_eq!(pos, 0);
+        assert_eq!(val, Ok(b"wereld" as &[u8]));
+        assert_eq!(key, Ok(b"hallo" as &[u8]));
+
+        let pos = node.node_lookup_le(b"hello")?;
+        let val = node.get_val(pos);
+        let key = node.get_key(pos);
+        assert_eq!(pos, 1);
+        assert_eq!(val, Ok(b"world" as &[u8]));
+        assert_eq!(key, Ok(b"hello" as &[u8]));
+
+        let pos = node.node_lookup_le(b"nonsense")?;
+        let key = node.get_key(pos);
+        assert_ne!(key, Ok(b"nonsense" as &[u8]));
+
+        Ok(())
+    }
+
+    #[test]
+    fn node_insert_key_values() -> Result<(), String> {
         let node = BNode::new(BNodeType::Node, 0);
 
         let new = node.leaf_insert(0, b"hallo", b"wereld")?;
@@ -616,6 +657,30 @@ mod tests {
         let pos = new.node_lookup_le(b"hello")?;
         assert_eq!(pos, 2);
         assert_eq!(new.get_val(pos), Ok(b"world" as &[u8]));
+
+        Ok(())
+    }
+
+    #[test]
+    fn node_update_key_values() -> Result<(), String> {
+        let node = BNode::new(BNodeType::Node, 0);
+
+        let new = node.leaf_insert(0, b"hallo", b"wereld")?;
+        let pos = new.node_lookup_le(b"hallo")?;
+        let val = new.get_val(pos);
+        assert_eq!(pos, 0);
+        assert_eq!(val, Ok(b"wereld" as &[u8]));
+
+        let new = new.leaf_update(0, b"hello", b"world")?;
+
+        let pos = new.node_lookup_le(b"hallo")?;
+        let key = new.get_key(pos);
+        assert_ne!(key, Ok(b"hallo" as &[u8]));
+
+        let pos = new.node_lookup_le(b"hello")?;
+        let val = new.get_val(pos);
+        assert_eq!(pos, 0);
+        assert_eq!(val, Ok(b"world" as &[u8]));
 
         Ok(())
     }
