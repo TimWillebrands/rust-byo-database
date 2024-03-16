@@ -98,7 +98,7 @@ impl BNode {
     pub fn get_ptr(&self, idx: u16) -> Result<u64, String> {
         if idx >= self.nkeys() {
             return Err(format!(
-                "Index out of bounds: {} >= keys {}",
+                "[get_ptr] Index out of bounds: {} >= keys {}",
                 idx,
                 self.nkeys()
             ));
@@ -107,7 +107,7 @@ impl BNode {
 
         if pos + 8 > self.data.len() {
             return Err(format!(
-                "Index out of data range: position {} + 8 exceeds data length {}",
+                "[get_ptr] Index out of data range: position {} + 8 exceeds data length {}",
                 pos,
                 self.data.len()
             ));
@@ -128,7 +128,7 @@ impl BNode {
     pub fn set_ptr(&mut self, idx: u16, val: u64) -> Result<(), String> {
         if idx >= self.nkeys() {
             return Err(format!(
-                "Index out of bounds: {} >= keys: {}",
+                "[set_ptr] Index out of bounds: {} >= keys: {}",
                 idx,
                 self.nkeys()
             ));
@@ -156,8 +156,12 @@ impl BNode {
     }
 
     pub fn get_offset(&self, idx: u16) -> Result<u16, String> {
-        if idx >= self.nkeys() {
-            return Err(format!("Index '{}' out of bounds: '{}'", idx, self.nkeys()));
+        if idx > self.nkeys() {
+            return Err(format!(
+                "[get_offset] Index '{}' is out of bounds. There are only '{} keys'",
+                idx,
+                self.nkeys()
+            ));
         }
 
         match idx {
@@ -208,7 +212,7 @@ impl BNode {
     pub fn get_val(&self, idx: u16) -> Result<&[u8], String> {
         if idx >= self.nkeys() {
             return Err(format!(
-                "Index out of bounds: {} >= nkeys: {}",
+                "[get_val] Index out of bounds: {} >= nkeys: {}",
                 idx,
                 self.nkeys()
             ));
@@ -264,41 +268,17 @@ impl BNode {
         Ok(last_found)
     }
 
-    // /// The nodeAppendKV function copies a KV pair to the new node.
-    // pub fn node_append_kv(
-    //     &mut self,
-    //     idx: u16,
-    //     ptr: u64,
-    //     key: &[u8],
-    //     val: &[u8],
-    // ) -> Result<(), String> {
-    //     // ptrs
-    //     self.set_ptr(idx, ptr)?;
-    //
-    //     // KVs
-    //     let pos = self.kv_pos(idx)? as usize;
-    //
-    //     let [dlen_high, dlen_low] = (key.len() as u16).to_le_bytes();
-    //     self.data[pos + 0] = dlen_high;
-    //     self.data[pos + 1] = dlen_low;
-    //     self.data[pos + 2] = dlen_high;
-    //     self.data[pos + 3] = dlen_low;
-    //
-    //     let end_of_key_pos = pos + 4 + key.len();
-    //     let key_slice = &mut self.data[pos + 4..end_of_key_pos];
-    //     key_slice.copy_from_slice(key);
-    //
-    //     let val_slice = &mut self.data[end_of_key_pos..end_of_key_pos + val.len()];
-    //     val_slice.copy_from_slice(val);
-    //
-    //     // the offset of the next key
-    //     self.set_offset(
-    //         idx + 1,
-    //         self.get_offset(idx)? + 4 + key.len() as u16 + val.len() as u16,
-    //     )?;
-    //
-    //     Ok(())
-    // }
+    fn node_enlarge(&mut self, required_space: usize) -> Result<(), String> {
+        let extra_space = std::cmp::max(self.data.capacity() / 10, 256); // Example: 10% or at least 256 bytes
+        self.data.resize(required_space + extra_space, 0); // Adjust length, filling new space with 0s
+
+        println!(
+            "Resized space in the node data. Required: {}, New-available: {}",
+            required_space,
+            self.data.capacity()
+        );
+        Ok(())
+    }
 
     /// Appends a key-value pair into a specified position within a BNode.
     ///
@@ -329,18 +309,14 @@ impl BNode {
         let pos = self.kv_pos(idx)? as usize;
 
         // Calculate the additional space needed for the new KV pair.
-        let additional_space = 4 + key.len() + val.len(); // 2B for each length + key and value sizes
+        // 2B for each length + key and value sizes
+        let additional_space = 4 + key.len() + val.len();
 
         // Ensure there is enough space in the data vector
         let required_space = pos + additional_space;
 
         if required_space > self.data.len() {
-            let extra_space = std::cmp::max(self.data.capacity() / 10, 256); // Example: 10% or at least 256 bytes
-            self.data.resize(required_space + extra_space, 0); // Adjust length, filling new space with 0s
-
-            // println!(
-            //     "Resized space in the node data to append to idx {}. Required: {}, New-available: {}, Position: {}, Key Length: {}, Value Length: {}",
-            //     idx, required_space, self.data.capacity(), pos, key.len(), val.len());
+            self.node_enlarge(required_space)?;
         }
 
         // Write the length of the key in little-endian format
@@ -397,6 +373,7 @@ impl BNode {
         let dst_begin = self.get_offset(dst_new)?;
         let src_begin = old.get_offset(src_old)?;
         for i in 1..=n {
+            // 1..=n
             let offset = dst_begin + old.get_offset(src_old + i)? - src_begin;
             self.set_offset(dst_new + i, offset)?;
         }
@@ -407,6 +384,20 @@ impl BNode {
         let dst_start = self.kv_pos(dst_new)? as usize;
 
         let src_slice = &old.data[begin..end];
+
+        // Correctly calculating additional space required for the KV pairs.
+        let additional_space = src_slice.len();
+
+        // Calculate the required space in the destination node. This should be
+        // where the copied data ends. This accounts for the length of existing
+        // data up to `dst_start` plus the length of the data being copied.
+        let required_space = dst_start + additional_space;
+
+        // Ensure there is enough space in the destination node's data vector.
+        if required_space > self.data.len() {
+            self.node_enlarge(required_space)?;
+        }
+
         let dst_slice = &mut self.data[dst_start..dst_start + src_slice.len()];
         dst_slice.copy_from_slice(src_slice);
 
@@ -508,7 +499,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn headers_stay_the_same() {
+    fn node_headers_stay_the_same() {
         let node = BNodeType::Node;
         let leaf = BNodeType::Leaf;
         assert_eq!(node.as_u16(), 1);
@@ -516,13 +507,13 @@ mod tests {
     }
 
     #[test]
-    fn check_constraints() {
+    fn node_check_constraints() {
         let node1max = HEADER + 8 + 2 + 4 + BTREE_MAX_KEY_SIZE + BTREE_MAX_VAL_SIZE;
         assert!(node1max <= BTREE_PAGE_SIZE)
     }
 
     #[test]
-    fn create_node_and_mutate_headers() {
+    fn node_create_and_mutate_headers() {
         let mut node = BNode::new(BNodeType::Node, 4);
         let required_size = usize::from((HEADER as u16) + 8 * 4 + 2 * 4);
 
@@ -547,7 +538,7 @@ mod tests {
     }
 
     #[test]
-    fn create_node_with_ptrvalue() {
+    fn node_create_with_ptrvalue() {
         let mut node = BNode::new(BNodeType::Node, 1);
         let val: u64 = 123456789;
         let res = node.set_ptr(0, val);
@@ -561,7 +552,7 @@ mod tests {
     }
 
     #[test]
-    fn check_ptrvalues() {
+    fn node_check_ptrvalues() {
         let mut node = BNode::new(BNodeType::Node, 5);
         _ = node.set_ptr(1, 11111);
         _ = node.set_ptr(0, 22222);
@@ -580,7 +571,7 @@ mod tests {
     }
 
     #[test]
-    fn offsets() {
+    fn node_offsets() {
         let mut node = BNode::new(BNodeType::Node, 5);
 
         let _ = node.set_offset(3, 1);
@@ -598,7 +589,7 @@ mod tests {
     }
 
     #[test]
-    fn key_values() -> Result<(), String> {
+    fn node_key_values() -> Result<(), String> {
         let node = BNode::new(BNodeType::Node, 0);
 
         let new = node.leaf_insert(0, b"hallo", b"wereld")?;
@@ -606,6 +597,25 @@ mod tests {
         assert_eq!(pos, 0);
         let val = new.get_val(pos);
         assert_eq!(val, Ok(b"wereld" as &[u8]));
+
+        let new = new.leaf_insert(1, b"hello", b"world")?;
+        let pos = new.node_lookup_le(b"hallo")?;
+        assert_eq!(pos, 0);
+        assert_eq!(new.get_val(pos), Ok(b"wereld" as &[u8]));
+        let pos = new.node_lookup_le(b"hello")?;
+        assert_eq!(pos, 1);
+        assert_eq!(new.get_val(pos), Ok(b"world" as &[u8]));
+
+        let new = new.leaf_insert(0, b"bienvenue", b"monde")?;
+        let pos = new.node_lookup_le(b"bienvenue")?;
+        assert_eq!(pos, 0);
+        assert_eq!(new.get_val(pos), Ok(b"monde" as &[u8]));
+        let pos = new.node_lookup_le(b"hallo")?;
+        assert_eq!(new.get_val(pos), Ok(b"wereld" as &[u8]));
+        assert_eq!(pos, 1);
+        let pos = new.node_lookup_le(b"hello")?;
+        assert_eq!(pos, 2);
+        assert_eq!(new.get_val(pos), Ok(b"world" as &[u8]));
 
         Ok(())
     }
