@@ -762,20 +762,6 @@ mod node {
             .leaf_insert(0, b"hello", b"world")? // Insert "hello" at position 0, shifting "world"
             .leaf_insert(1, b"hallo", b"wereld")?; // Insert "hallo" at position 1, between "hello" and "world"
 
-        let kvs = node.get_kvs(0, 3)?;
-        for (i, (key, val)) in kvs.iter().enumerate() {
-            let key_str = String::from_utf8_lossy(key);
-            let val_str = String::from_utf8_lossy(val);
-            println!("Key at index {}: {} => Value: {}", i, key_str, val_str);
-        }
-
-        let le = node.exact_key_lookup(b"hello")?;
-        let key = node.get_key(le)?;
-        let val = node.get_val(le)?;
-        let key_str = String::from_utf8_lossy(key);
-        let val_str = String::from_utf8_lossy(val);
-        println!("Lookup at index {}: {} => Value: {}", le, key_str, val_str);
-
         // Verify initial insertions
         assert_eq_as_str!(
             node.get_val(node.exact_key_lookup(b"hello")?).unwrap(),
