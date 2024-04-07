@@ -266,7 +266,7 @@ impl BNode {
     /// # Returns
     /// * `Result<u16, String>` - Ok contains the index of the closest child node by key range.
     ///   Err returns a string describing the error if any issues occur during key retrieval.
-    pub fn node_lookup_le(&self, key: &[u8]) -> Result<u16, String> {
+    pub fn lookup_le(&self, key: &[u8]) -> Result<u16, String> {
         let mut last_found = 0u16; // Initialize with 0, assuming the first key is always less than or equal
 
         // Start from 1 since the first key is always considered less than or equal
@@ -281,7 +281,36 @@ impl BNode {
         Ok(last_found)
     }
 
-    fn node_enlarge(&mut self, required_space: usize) -> Result<(), String> {
+    /// Performs an exact key lookup in the node, including the first key in the search.
+    ///
+    /// This method extends `lookup_le` by explicitly checking the first key for a match
+    /// before proceeding with the lookup, ensuring that the search covers all keys in the node.
+    ///
+    /// Refer to `lookup_le` for details on the lookup process starting from index 1.
+    ///
+    /// # Arguments
+    /// * `key` - The key to search for, as a byte slice.
+    ///
+    /// # Returns
+    /// * `Result<u16, String>` - Ok contains the index of the key if found, including index 0.
+    ///   Err returns a string describing the error if any issues occur during key retrieval.
+    ///
+    /// This method is particularly useful for operations requiring the exact position of a key,
+    /// complementing `lookup_le` which is optimized for navigating child nodes based on key ranges.
+    pub fn exact_key_lookup(&self, key: &[u8]) -> Result<u16, String> {
+        // Directly compare the first key if there is one
+        if self.nkeys() > 0 {
+            let first_key = self.get_key(0)?;
+            if first_key == key {
+                return Ok(0);
+            }
+        }
+
+        // Use lookup_le for subsequent keys
+        self.lookup_le(key)
+    }
+
+    fn enlarge(&mut self, required_space: usize) -> Result<(), String> {
         let extra_space = std::cmp::max(self.data.capacity() / 10, 256); // Example: 10% or at least 256 bytes
         self.data.resize(required_space + extra_space, 0); // Adjust length, filling new space with 0s
 
@@ -311,7 +340,7 @@ impl BNode {
     ///
     /// The method is useful for navigating B-trees, where finding the correct child node based on key ranges
     /// is essential for insertions, deletions, and searches.
-    pub fn node_append_kv(
+    pub fn append_kv(
         &mut self,
         idx: u16,
         ptr: u64,
@@ -332,7 +361,7 @@ impl BNode {
         let required_space = pos + additional_space;
 
         if required_space > self.data.len() {
-            self.node_enlarge(required_space)?;
+            self.enlarge(required_space)?;
         }
 
         // Write the length of the key in little-endian format
@@ -357,7 +386,7 @@ impl BNode {
 
     /// The nodeAppendRange function copies keys from an old node to a new node.
     /// copy multiple KVs into the position
-    pub fn node_append_range(
+    pub fn append_range(
         &mut self,
         old: &BNode,
         dst_new: u16,
@@ -410,7 +439,7 @@ impl BNode {
 
         // Ensure there is enough space in the destination node's data vector.
         if required_space > self.data.len() {
-            self.node_enlarge(required_space)?;
+            self.enlarge(required_space)?;
         }
 
         let dst_slice = &mut self.data[dst_start..dst_start + src_slice.len()];
@@ -439,9 +468,9 @@ impl BNode {
         let mut new = BNode::new(BNodeType::Leaf, self.nkeys() + 1);
 
         // Copy all key-value pairs from `self` to `new` up to the one being inserted
-        new.node_append_range(self, 0, 0, idx)?;
-        new.node_append_kv(idx, 0, key, val)?;
-        new.node_append_range(self, idx + 1, idx, self.nkeys() - idx)?;
+        new.append_range(self, 0, 0, idx)?;
+        new.append_kv(idx, 0, key, val)?;
+        new.append_range(self, idx + 1, idx, self.nkeys() - idx)?;
 
         Ok(new)
     }
@@ -452,16 +481,43 @@ impl BNode {
         println!("src: {:?}", self.data);
         println!("new: {:?}", new.data);
         // Copy all key-value pairs from `self` to `new` up to the one being updated
-        new.node_append_range(self, 0, 0, idx)?;
+        new.append_range(self, 0, 0, idx)?;
 
         println!("newer: {:?}", new.data);
         // Insert key-value at the spot that was to be "updated"
-        new.node_append_kv(idx, 0, key, val)?;
+        new.append_kv(idx, 0, key, val)?;
 
         // Copy the remaining key-value pairs from `self` to `new` after the updated one
-        new.node_append_range(self, idx + 1, idx + 1, self.nkeys() - idx - 1)?;
+        new.append_range(self, idx + 1, idx + 1, self.nkeys() - idx - 1)?;
 
         Ok(new)
+    }
+
+    pub fn get_kvs(&self, from_idx: u16, mut amount: u16) -> Result<Vec<(&[u8], &[u8])>, String> {
+        // Cap the amount to the maximum available keys from from_idx
+        if from_idx >= self.nkeys() {
+            return Ok(Vec::new()); // Return an empty vector if from_idx is out of bounds
+        }
+
+        if from_idx + amount > self.nkeys() {
+            amount = self.nkeys() - from_idx; // Adjust amount to not exceed available keys
+        }
+
+        let mut kvs = Vec::new();
+
+        for i in from_idx..from_idx + amount {
+            let key = self
+                .get_key(i)
+                .map_err(|e| format!("Failed to get key at index {}: {}", i, e))?;
+
+            let val = self
+                .get_val(i)
+                .map_err(|e| format!("Failed to get value at index {}: {}", i, e))?;
+
+            kvs.push((key, val));
+        }
+
+        Ok(kvs)
     }
 }
 
@@ -480,7 +536,7 @@ impl BTree {
     /// and splitting and allocating result nodes.
     pub fn tree_insert(&mut self, node: BNode, key: &[u8], val: &[u8]) -> Result<BNode, String> {
         // where to insert the key?
-        let idx = node.node_lookup_le(key)?;
+        let idx = node.lookup_le(key)?;
 
         // act depending on the node type
         match node.btype()? {
@@ -488,12 +544,12 @@ impl BTree {
                 std::cmp::Ordering::Equal => node.leaf_update(idx, key, val),
                 _ => node.leaf_insert(idx, key, val),
             },
-            BNodeType::Node => self.node_insert(&node, idx, key, val),
+            BNodeType::Node => self.insert(&node, idx, key, val),
         }
     }
 
     // part of the treeInsert(): KV insertion to an internal node
-    pub fn node_insert(
+    pub fn insert(
         &mut self,
         node: &BNode,
         idx: u16,
@@ -509,11 +565,24 @@ impl BTree {
 }
 
 #[cfg(test)]
-mod tests {
+mod node {
     use super::*;
 
+    macro_rules! assert_eq_as_str {
+        ($left:expr, $right:expr) => {{
+            let left_str = String::from_utf8_lossy($left);
+            let right_str = String::from_utf8_lossy($right);
+            assert!(
+                left_str == right_str,
+                "assertion failed: `(left == right)`\n  left: `{}`\n right: `{}`",
+                left_str,
+                right_str
+            );
+        }};
+    }
+
     #[test]
-    fn node_headers_stay_the_same() {
+    fn headers_stay_the_same() {
         let node = BNodeType::Node;
         let leaf = BNodeType::Leaf;
         assert_eq!(node.as_u16(), 1);
@@ -521,13 +590,13 @@ mod tests {
     }
 
     #[test]
-    fn node_check_constraints() {
+    fn check_constraints() {
         let node1max = HEADER + 8 + 2 + 4 + BTREE_MAX_KEY_SIZE + BTREE_MAX_VAL_SIZE;
         assert!(node1max <= BTREE_PAGE_SIZE)
     }
 
     #[test]
-    fn node_create_and_mutate_headers() {
+    fn create_and_mutate_headers() {
         let mut node = BNode::new(BNodeType::Node, 4);
         let required_size = usize::from((HEADER as u16) + 8 * 4 + 2 * 4);
 
@@ -552,7 +621,7 @@ mod tests {
     }
 
     #[test]
-    fn node_create_with_ptrvalue() {
+    fn create_with_ptrvalue() {
         let mut node = BNode::new(BNodeType::Node, 1);
         let val: u64 = 123456789;
         let res = node.set_ptr(0, val);
@@ -566,7 +635,7 @@ mod tests {
     }
 
     #[test]
-    fn node_check_ptrvalues() {
+    fn check_ptrvalues() {
         let mut node = BNode::new(BNodeType::Node, 5);
         _ = node.set_ptr(1, 11111);
         _ = node.set_ptr(0, 22222);
@@ -585,7 +654,7 @@ mod tests {
     }
 
     #[test]
-    fn node_offsets() {
+    fn offsets() {
         let mut node = BNode::new(BNodeType::Node, 5);
 
         let _ = node.set_offset(3, 1);
@@ -603,26 +672,26 @@ mod tests {
     }
 
     #[test]
-    fn node_lookup_key_values() -> Result<(), String> {
+    fn lookup_key_values() -> Result<(), String> {
         let node = BNode::new(BNodeType::Node, 0)
             .leaf_insert(0, b"hallo", b"wereld")?
             .leaf_insert(1, b"hello", b"world")?;
 
-        let pos = node.node_lookup_le(b"hallo")?;
+        let pos = node.exact_key_lookup(b"hallo")?;
         let val = node.get_val(pos);
         let key = node.get_key(pos);
         assert_eq!(pos, 0);
         assert_eq!(val, Ok(b"wereld" as &[u8]));
         assert_eq!(key, Ok(b"hallo" as &[u8]));
 
-        let pos = node.node_lookup_le(b"hello")?;
+        let pos = node.exact_key_lookup(b"hello")?;
         let val = node.get_val(pos);
         let key = node.get_key(pos);
         assert_eq!(pos, 1);
         assert_eq!(val, Ok(b"world" as &[u8]));
         assert_eq!(key, Ok(b"hello" as &[u8]));
 
-        let pos = node.node_lookup_le(b"nonsense")?;
+        let pos = node.exact_key_lookup(b"nonsense")?;
         let key = node.get_key(pos);
         assert_ne!(key, Ok(b"nonsense" as &[u8]));
 
@@ -630,31 +699,31 @@ mod tests {
     }
 
     #[test]
-    fn node_insert_key_values() -> Result<(), String> {
+    fn insert_key_values() -> Result<(), String> {
         let node = BNode::new(BNodeType::Node, 0);
 
         let new = node.leaf_insert(0, b"hallo", b"wereld")?;
-        let pos = new.node_lookup_le(b"hallo")?;
+        let pos = new.exact_key_lookup(b"hallo")?;
         assert_eq!(pos, 0);
         let val = new.get_val(pos);
         assert_eq!(val, Ok(b"wereld" as &[u8]));
 
         let new = new.leaf_insert(1, b"hello", b"world")?;
-        let pos = new.node_lookup_le(b"hallo")?;
+        let pos = new.exact_key_lookup(b"hallo")?;
         assert_eq!(pos, 0);
         assert_eq!(new.get_val(pos), Ok(b"wereld" as &[u8]));
-        let pos = new.node_lookup_le(b"hello")?;
+        let pos = new.exact_key_lookup(b"hello")?;
         assert_eq!(pos, 1);
         assert_eq!(new.get_val(pos), Ok(b"world" as &[u8]));
 
         let new = new.leaf_insert(0, b"bienvenue", b"monde")?;
-        let pos = new.node_lookup_le(b"bienvenue")?;
+        let pos = new.exact_key_lookup(b"bienvenue")?;
         assert_eq!(pos, 0);
         assert_eq!(new.get_val(pos), Ok(b"monde" as &[u8]));
-        let pos = new.node_lookup_le(b"hallo")?;
+        let pos = new.exact_key_lookup(b"hallo")?;
         assert_eq!(new.get_val(pos), Ok(b"wereld" as &[u8]));
         assert_eq!(pos, 1);
-        let pos = new.node_lookup_le(b"hello")?;
+        let pos = new.exact_key_lookup(b"hello")?;
         assert_eq!(pos, 2);
         assert_eq!(new.get_val(pos), Ok(b"world" as &[u8]));
 
@@ -662,25 +731,95 @@ mod tests {
     }
 
     #[test]
-    fn node_update_key_values() -> Result<(), String> {
+    fn update_key_values() -> Result<(), String> {
         let node = BNode::new(BNodeType::Node, 0);
 
         let new = node.leaf_insert(0, b"hallo", b"wereld")?;
-        let pos = new.node_lookup_le(b"hallo")?;
+        let pos = new.exact_key_lookup(b"hallo")?;
         let val = new.get_val(pos);
         assert_eq!(pos, 0);
         assert_eq!(val, Ok(b"wereld" as &[u8]));
 
         let new = new.leaf_update(0, b"hello", b"world")?;
 
-        let pos = new.node_lookup_le(b"hallo")?;
+        let pos = new.exact_key_lookup(b"hallo")?;
         let key = new.get_key(pos);
         assert_ne!(key, Ok(b"hallo" as &[u8]));
 
-        let pos = new.node_lookup_le(b"hello")?;
+        let pos = new.exact_key_lookup(b"hello")?;
         let val = new.get_val(pos);
         assert_eq!(pos, 0);
         assert_eq!(val, Ok(b"world" as &[u8]));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_leaf_insert_and_update() -> Result<(), String> {
+        // Initial insertions in non-sequential order
+        let mut node = BNode::new(BNodeType::Leaf, 0)
+            .leaf_insert(0, b"world", b"earth")? // Insert "world" at position 0
+            .leaf_insert(0, b"hello", b"world")? // Insert "hello" at position 0, shifting "world"
+            .leaf_insert(1, b"hallo", b"wereld")?; // Insert "hallo" at position 1, between "hello" and "world"
+
+        let kvs = node.get_kvs(0, 3)?;
+        for (i, (key, val)) in kvs.iter().enumerate() {
+            let key_str = String::from_utf8_lossy(key);
+            let val_str = String::from_utf8_lossy(val);
+            println!("Key at index {}: {} => Value: {}", i, key_str, val_str);
+        }
+
+        let le = node.exact_key_lookup(b"hello")?;
+        let key = node.get_key(le)?;
+        let val = node.get_val(le)?;
+        let key_str = String::from_utf8_lossy(key);
+        let val_str = String::from_utf8_lossy(val);
+        println!("Lookup at index {}: {} => Value: {}", le, key_str, val_str);
+
+        // Verify initial insertions
+        assert_eq_as_str!(
+            node.get_val(node.exact_key_lookup(b"hello")?).unwrap(),
+            b"world"
+        );
+        assert_eq_as_str!(
+            node.get_val(node.exact_key_lookup(b"hallo")?).unwrap(),
+            b"wereld"
+        );
+        assert_eq_as_str!(
+            node.get_val(node.exact_key_lookup(b"world")?).unwrap(),
+            b"earth"
+        );
+
+        node = node.leaf_update(node.exact_key_lookup(b"world")?, b"world", b"planet")?;
+
+        // Verify update
+        assert_eq_as_str!(
+            node.get_val(node.exact_key_lookup(b"world")?).unwrap(),
+            b"planet"
+        );
+
+        // Verify other keys are unaffected
+        assert_eq_as_str!(
+            node.get_val(node.exact_key_lookup(b"hello")?).unwrap(),
+            b"world"
+        );
+        assert_eq_as_str!(
+            node.get_val(node.exact_key_lookup(b"hallo")?).unwrap(),
+            b"wereld"
+        );
+
+        // Attempt to lookup a key that doesn't exist
+        let pos = node.exact_key_lookup(b"unknown")?;
+        assert_ne!(node.get_key(pos).unwrap(), b"unknown");
+
+        // Verify behavior at the boundaries of the keys
+        // Looking up a key smaller than any existing key
+        let smallest_pos = node.exact_key_lookup(b"a")?;
+        assert_eq!(smallest_pos, 0); // Should point to the first key as the smallest key
+
+        // Looking up a key larger than any existing key
+        let largest_pos = node.exact_key_lookup(b"z")?;
+        assert_eq!(largest_pos, node.nkeys() - 1); // Should point to the last key as the largest key
 
         Ok(())
     }
